@@ -415,6 +415,27 @@ pub fn expand_wildcard(
     wildcard_options: Option<&WildcardOptions>,
 ) -> Result<Vec<Expr>> {
     let mut columns_to_skip = exclude_using_columns(plan)?;
+
+    // Only skip a USING join key when the schema actually contains multiple
+    // fields with the same name (i.e. there is a genuine duplicate to remove).
+    // Without this guard, chained USING joins can incorrectly mark the sole
+    // copy of a join key as "excluded".  For example, in
+    //
+    //   e JOIN p USING (start_ip) JOIN a USING (start_ip)
+    //
+    // the outer USING set is {a.start_ip, e.start_ip}; sorted alphabetically,
+    // a.start_ip comes first so e.start_ip is tagged for exclusion — even when
+    // the schema being expanded (e.g. a Projection) only contains e.start_ip.
+    {
+        let mut name_count: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for field in schema.fields() {
+            *name_count.entry(field.name().as_str()).or_default() += 1;
+        }
+        columns_to_skip
+            .retain(|c| name_count.get(c.name.as_str()).copied().unwrap_or(0) > 1);
+    }
+
     let excluded_columns = if let Some(WildcardOptions {
         exclude: opt_exclude,
         except: opt_except,

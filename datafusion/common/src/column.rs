@@ -265,6 +265,37 @@ impl Column {
                         }
                     }
 
+                    // Transitive closure check: for chained USING joins like
+                    //   t1 JOIN t2 USING(id) JOIN t3 USING(id)
+                    // the column `id` appears in two USING sets — {t1.id, t2.id} and
+                    // {t2.id, t3.id} — neither of which covers all three matches alone.
+                    // We build the transitive union starting from the first matched column
+                    // and check if it covers all matches.
+                    if !using_columns.is_empty() {
+                        let mut reachable: HashSet<Column> = HashSet::new();
+                        for using_col in using_columns.iter() {
+                            if using_col.contains(&columns[0]) {
+                                reachable.extend(using_col.iter().cloned());
+                            }
+                        }
+                        let mut changed = true;
+                        while changed {
+                            changed = false;
+                            for using_col in using_columns.iter() {
+                                if using_col.iter().any(|c| reachable.contains(c)) {
+                                    let prev = reachable.len();
+                                    reachable.extend(using_col.iter().cloned());
+                                    if reachable.len() > prev {
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        if columns.iter().all(|c| reachable.contains(c)) {
+                            return Ok(columns[0].clone());
+                        }
+                    }
+
                     // If not due to USING columns then due to ambiguous column name
                     return _schema_err!(SchemaError::AmbiguousReference {
                         field: Box::new(Column::new_unqualified(&self.name)),
